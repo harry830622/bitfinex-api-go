@@ -1610,11 +1610,14 @@ type BookUpdate struct {
 	Symbol      string      // book symbol
 	Price       float64     // updated price
 	PriceJsNum  json.Number // update price as json.Number
+	Rate        float64     // updated rate
+	RateJsNum   json.Number // update rate as json.Number
 	Count       int64       // updated count, optional
 	Amount      float64     // updated amount
 	AmountJsNum json.Number // update amount as json.Number
 	Side        OrderSide   // side
 	Action      BookAction  // action (add/remove)
+	Period      int64       // period
 }
 
 type BookUpdateSnapshot struct {
@@ -1637,43 +1640,79 @@ func NewBookUpdateSnapshotFromRaw(symbol, precision string, raw [][]float64, raw
 }
 
 func IsRawBook(precision string) bool {
-	return precision == "R0"
+	return BookPrecision(precision) == PrecisionRawBook
+}
+
+func IsFundingBook(symbol string) bool {
+	return strings.HasPrefix(symbol, FundingPrefix)
 }
 
 // NewBookUpdateFromRaw creates a new book update object from raw data.  Precision determines how
 // to interpret the side (baked into Count versus Amount)
-// raw book updates [ID, price, qty], aggregated book updates [price, amount, count]
+// Trading: raw book updates [ID, price, amount], aggregated book updates [price, count, amount]
+// Funding: raw book updates [ID, period, rate, amount], aggregated book updates [rate, period, count, amount]
 func NewBookUpdateFromRaw(symbol, precision string, data []interface{}, raw_numbers interface{}) (b *BookUpdate, err error) {
 	if len(data) < 3 {
 		return b, fmt.Errorf("data slice too short for book update, expected %d got %d: %#v", 5, len(data), data)
 	}
-	var px float64
-	var px_num json.Number
-	var id, cnt int64
-	raw_num_array := raw_numbers.([]interface{})
-	amt := convert.F64ValOrZero(data[2])
-	amt_num := convert.FloatToJsonNumber(raw_num_array[2])
 
+	raw_num_array := raw_numbers.([]interface{})
+
+	var px, rate, amt float64
+	var px_num, rate_num, amt_num json.Number
+	var id, cnt, period int64
 	var side OrderSide
 	var actionCtrl float64
-	if IsRawBook(precision) {
-		// [ID, price, amount]
-		id = convert.I64ValOrZero(data[0])
-		px = convert.F64ValOrZero(data[1])
-		px_num = convert.FloatToJsonNumber(raw_num_array[1])
-		actionCtrl = px
+	isFundingBook := IsFundingBook(symbol)
+	isRawBook := IsRawBook(precision)
+	if isFundingBook {
+		amt = convert.F64ValOrZero(data[3])
+		amt_num = convert.FloatToJsonNumber(raw_num_array[3])
+		if isRawBook {
+			// [ID, period, rate, amount]
+			id = convert.I64ValOrZero(data[0])
+			rate = convert.F64ValOrZero(data[2])
+			rate_num = convert.FloatToJsonNumber(raw_num_array[2])
+			actionCtrl = rate
+			period = convert.I64ValOrZero(data[1])
+		} else {
+			// [rate, period, count, amount]
+			rate = convert.F64ValOrZero(data[0])
+			rate_num = convert.FloatToJsonNumber(raw_num_array[0])
+			cnt = convert.I64ValOrZero(data[2])
+			actionCtrl = float64(cnt)
+			period = convert.I64ValOrZero(data[1])
+		}
 	} else {
-		// [price, amount, count]
-		px = convert.F64ValOrZero(data[0])
-		px_num = convert.FloatToJsonNumber(raw_num_array[0])
-		cnt = convert.I64ValOrZero(data[1])
-		actionCtrl = float64(cnt)
+		amt = convert.F64ValOrZero(data[2])
+		amt_num = convert.FloatToJsonNumber(raw_num_array[2])
+		if isRawBook {
+			// [ID, price, amount]
+			id = convert.I64ValOrZero(data[0])
+			px = convert.F64ValOrZero(data[1])
+			px_num = convert.FloatToJsonNumber(raw_num_array[1])
+			actionCtrl = px
+		} else {
+			// [price, count, amount]
+			px = convert.F64ValOrZero(data[0])
+			px_num = convert.FloatToJsonNumber(raw_num_array[0])
+			cnt = convert.I64ValOrZero(data[1])
+			actionCtrl = float64(cnt)
+		}
 	}
 
-	if amt > 0 {
-		side = Bid
+	if isFundingBook {
+		if amt < 0 {
+			side = Bid
+		} else {
+			side = Ask
+		}
 	} else {
-		side = Ask
+		if amt > 0 {
+			side = Bid
+		} else {
+			side = Ask
+		}
 	}
 
 	var action BookAction
@@ -1687,12 +1726,15 @@ func NewBookUpdateFromRaw(symbol, precision string, data []interface{}, raw_numb
 		Symbol:      symbol,
 		Price:       math.Abs(px),
 		PriceJsNum:  px_num,
+		Rate:        math.Abs(rate),
+		RateJsNum:   rate_num,
 		Count:       cnt,
 		Amount:      math.Abs(amt),
 		AmountJsNum: amt_num,
 		Side:        side,
 		Action:      action,
 		ID:          id,
+		Period:      period,
 	}
 
 	return
